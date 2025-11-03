@@ -1,0 +1,208 @@
+nextflow_process {
+
+    name "Test Process KRAKEN2_K2DAEMON"
+    script "../main.nf"
+    process "KRAKEN2_K2DAEMON"
+    tag "modules"
+    tag "modules_local"
+    tag "kraken2"
+    tag "k2daemon"
+
+    config "./nextflow.config"
+
+    setup {
+        run("UNTAR") {
+            script "modules/nf-core/untar/main.nf"
+            process {
+                """
+                input[0] = Channel.of([
+                    [],
+                    file(
+                        params.modules_testdata_base_path + "genomics/sarscov2/genome/db/kraken2.tar.gz",
+                        checkIfExists: true
+                    )
+                ])
+                """
+            }
+        }
+    }
+
+    test("sarscov2 illumina single-end batch [fastq]") {
+        when {
+            process {
+                """
+                input[0] = [
+                    [id: 'test_batch', single_end: true],
+                    [
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test_1.fastq.gz", checkIfExists: true),
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test2_1.fastq.gz", checkIfExists: true)
+                    ],
+                    ['sample1', 'sample2']
+                ]
+                input[1] = UNTAR.out.untar.map{ it[1] }
+                input[2] = true   // save_output_fastqs
+                input[3] = false  // save_reads_assignment
+                """
+            }
+        }
+
+        then {
+            def reports = process.out.report.get(0).get(1).collect { report -> file(report).name }
+            def expected_reports = ['sample1.kraken2.report.txt', 'sample2.kraken2.report.txt']
+
+            assertAll(
+                { assert process.success },
+                { assertContainsInAnyOrder(reports, expected_reports) },
+                { assert snapshot(
+                    process.out.classified_reads_fastq,
+                    process.out.unclassified_reads_fastq,
+                    process.out.versions
+                ).match() }
+            )
+        }
+    }
+
+    test("sarscov2 illumina paired-end batch [fastq]") {
+        when {
+            process {
+                """
+                input[0] = [
+                    [id: 'test_batch', single_end: false],
+                    [
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test_1.fastq.gz", checkIfExists: true),
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test_2.fastq.gz", checkIfExists: true),
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test2_1.fastq.gz", checkIfExists: true),
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test2_2.fastq.gz", checkIfExists: true)
+                    ],
+                    ['sample1', 'sample2']
+                ]
+                input[1] = UNTAR.out.untar.map{ it[1] }
+                input[2] = true   // save_output_fastqs
+                input[3] = false  // save_reads_assignment
+                """
+            }
+        }
+
+        then {
+            def reports = process.out.report.get(0).get(1).collect { report -> file(report).name }
+            def expected_reports = ['sample1.kraken2.report.txt', 'sample2.kraken2.report.txt']
+
+            assertAll(
+                { assert process.success },
+                { assertContainsInAnyOrder(reports, expected_reports) },
+                { assert snapshot(
+                    process.out.classified_reads_fastq,
+                    process.out.unclassified_reads_fastq,
+                    process.out.versions
+                ).match() }
+            )
+        }
+    }
+
+    test("sarscov2 illumina single-end batch [fastq] + save_reads_assignment") {
+        when {
+            process {
+                """
+                input[0] = [
+                    [id: 'test_batch', single_end: true],
+                    [
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test_1.fastq.gz", checkIfExists: true),
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test2_1.fastq.gz", checkIfExists: true)
+                    ],
+                    ['sample1', 'sample2']
+                ]
+                input[1] = UNTAR.out.untar.map{ it[1] }
+                input[2] = false  // save_output_fastqs
+                input[3] = true   // save_reads_assignment
+                """
+            }
+        }
+
+        then {
+            def reports = process.out.report.get(0).get(1).collect { report -> file(report).name }
+            def expected_reports = ['sample1.kraken2.report.txt', 'sample2.kraken2.report.txt']
+
+            assertAll(
+                { assert process.success },
+                { assertContainsInAnyOrder(reports, expected_reports) },
+                { assert snapshot(
+                    process.out.report,
+                    process.out.classified_reads_assignment,
+                    process.out.versions
+                ).match() }
+            )
+        }
+    }
+
+    test("sarscov2 illumina single-end batch [fastq] - reports only") {
+        when {
+            process {
+                """
+                input[0] = [
+                    [id: 'test_batch', single_end: true],
+                    [
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test_1.fastq.gz", checkIfExists: true),
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test2_1.fastq.gz", checkIfExists: true)
+                    ],
+                    ['sample1', 'sample2']
+                ]
+                input[1] = UNTAR.out.untar.map{ it[1] }
+                input[2] = false  // save_output_fastqs
+                input[3] = false  // save_reads_assignment
+                """
+            }
+        }
+
+        then {
+            def reports = process.out.report.get(0).get(1).collect { report -> file(report).name }
+            def expected_reports = ['sample1.kraken2.report.txt', 'sample2.kraken2.report.txt']
+
+            assertAll(
+                { assert process.success },
+                { assertContainsInAnyOrder(reports, expected_reports) },
+                { assert snapshot(
+                    process.out.report,
+                    process.out.versions
+                ).match() }
+            )
+        }
+    }
+
+    test("sarscov2 illumina single-end batch [fastq] - stub") {
+        options "-stub-run"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [id: 'test_batch', single_end: true],
+                    [
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test_1.fastq.gz", checkIfExists: true),
+                        file(params.modules_testdata_base_path + "genomics/sarscov2/illumina/fastq/test2_1.fastq.gz", checkIfExists: true)
+                    ],
+                    ['sample1', 'sample2']
+                ]
+                input[1] = UNTAR.out.untar.map{ it[1] }
+                input[2] = true   // save_output_fastqs
+                input[3] = true   // save_reads_assignment
+                """
+            }
+        }
+
+        then {
+            def reports = process.out.report.get(0).get(1).collect { report -> file(report).name }
+            def expected_reports = ['sample1.kraken2.report.txt', 'sample2.kraken2.report.txt']
+
+            assertAll(
+                { assert process.success },
+                { assertContainsInAnyOrder(reports, expected_reports) },
+                { assert snapshot(
+                    process.out.classified_reads_fastq,
+                    process.out.unclassified_reads_fastq,
+                    process.out.classified_reads_assignment,
+                    process.out.versions
+                ).match() }
+            )
+        }
+    }
+}

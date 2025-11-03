@@ -482,6 +482,20 @@
                     "fa_icon": "fas fa-save",
                     "help_text": "Turn on saving minimizer information in the kraken2 report thus increasing to an eight column layout.\n\nAdds `--report-minimizer-data` to the kraken2 command."
                 },
+                "use_kraken2_daemon": {
+                    "type": "boolean",
+                    "default": false,
+                    "fa_icon": "fas fa-toggle-on",
+                    "description": "Use Kraken2 daemon mode for efficient batch processing of multiple samples.",
+                    "help_text": "Enable Kraken2 daemon mode which keeps the database loaded in memory across multiple sample classifications, avoiding repeated database loading overhead. When enabled, samples are processed in batches (see kraken2_daemon_batch_size). This saves significant time when profiling multiple samples with the same database by eliminating the need to reload the database for each sample."
+                },
+                "kraken2_daemon_batch_size": {
+                    "type": "integer",
+                    "default": 20,
+                    "fa_icon": "far fa-window-restore",
+                    "description": "Specify the number of samples for each Kraken2 daemon run.",
+                    "help_text": "Specify the batch size for Kraken2 daemon mode. The reference database is loaded into memory once per nextflow process and then used to classify multiple samples. When you have many samples, a single Kraken2 daemon run can be rather slow. Alternatively, we can split up Kraken2 daemon runs for a 'batch' of samples, allowing a balance between shared use of database for multiple samples, but also faster parallelised Kraken2 runs. This parameter determines how many samples to process at a time per daemon instance."
+                },
                 "run_krakenuniq": {
                     "type": "boolean",
                     "fa_icon": "fas fa-toggle-on",

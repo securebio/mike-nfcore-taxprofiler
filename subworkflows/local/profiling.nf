@@ -5,6 +5,7 @@
 include { MALT_RUN                                      } from '../../modules/nf-core/malt/run/main'
 include { MEGAN_RMA2INFO as MEGAN_RMA2INFO_TSV          } from '../../modules/nf-core/megan/rma2info/main'
 include { KRAKEN2_KRAKEN2                               } from '../../modules/nf-core/kraken2/kraken2/main'
+include { KRAKEN2_K2DAEMON                               } from '../../modules/local/kraken2/k2daemon/main'
 include { KRAKEN2_STANDARD_REPORT                       } from '../../modules/local/kraken2_standard_report'
 include { BRACKEN_BRACKEN                               } from '../../modules/nf-core/bracken/bracken/main'
 include { CENTRIFUGE_CENTRIFUGE                         } from '../../modules/nf-core/centrifuge/centrifuge/main'
@@ -181,25 +182,66 @@ workflow PROFILING {
                 db_meta_new.tool == 'kraken2' || (db_meta_new.tool == 'bracken' && meta.instrument_platform != 'OXFORD_NANOPORE')
             }
 
-        ch_input_for_kraken2 = ch_prepare_for_kraken2.multiMap { it ->
-            reads: [it[0] + it[2], it[1]]
-            db: it[3]
-        }
+        if (params.use_kraken2_daemon) {
+            // Use KRAKEN2_K2DAEMON for batched processing
+            ch_input_for_k2daemon = ch_prepare_for_kraken2
+                .map { meta, reads, db_meta, db ->
+                    // Create sample prefix for output file naming
+                    def prefix = params.perform_runmerging ? meta.id : "${meta.id}_${meta.run_accession}"
+                    prefix = meta.single_end ? "${prefix}.se" : "${prefix}.pe"
+                    // Create simplified meta for grouping by database + single_end status
+                    [[id: db_meta.db_name, single_end: meta.single_end], [reads].flatten() + [prefix], db_meta, db]
+                }
+                .groupTuple(by: [0, 2, 3])
+                .flatMap { single_meta, reads, db_meta, db ->
+                    // Sort samples by prefix for cache consistency
+                    reads.sort { a, b -> a[-1] <=> b[-1] }
+                    def batches = reads.collate(params.kraken2_daemon_batch_size)
+                    return batches.collect { batch ->
+                        // Separate reads from prefixes after batching
+                        def reads_batch = batch.collect { elements -> elements.take(elements.size() - 1) }.flatten()
+                        def prefixes = batch.collect { elements -> elements[-1] }
+                        return [single_meta + db_meta, reads_batch, prefixes, db]
+                    }
+                }
+                .multiMap { meta, reads, prefixes, db ->
+                    reads: [meta, reads, prefixes]
+                    db: db
+                }
 
-        KRAKEN2_KRAKEN2(ch_input_for_kraken2.reads, ch_input_for_kraken2.db, params.kraken2_save_reads, params.kraken2_save_readclassifications)
-        ch_multiqc_files = ch_multiqc_files.mix(KRAKEN2_KRAKEN2.out.report)
-        ch_versions = ch_versions.mix(KRAKEN2_KRAKEN2.out.versions.first())
-        ch_raw_classifications = ch_raw_classifications.mix(KRAKEN2_KRAKEN2.out.classified_reads_assignment)
-        ch_raw_profiles = ch_raw_profiles.mix(
-            KRAKEN2_KRAKEN2.out.report.map { meta, report ->
-                def new_tool = [meta + [tool: meta.tool == 'bracken' ? 'kraken2-bracken' : meta.tool], report]
+            KRAKEN2_K2DAEMON(ch_input_for_k2daemon.reads, ch_input_for_k2daemon.db, params.kraken2_save_reads, params.kraken2_save_readclassifications)
+            ch_multiqc_files = ch_multiqc_files.mix(KRAKEN2_K2DAEMON.out.report)
+            ch_versions = ch_versions.mix(KRAKEN2_K2DAEMON.out.versions.first())
+            ch_raw_classifications = ch_raw_classifications.mix(KRAKEN2_K2DAEMON.out.classified_reads_assignment)
+            ch_raw_profiles = ch_raw_profiles.mix(
+                KRAKEN2_K2DAEMON.out.report.map { meta, report ->
+                    def new_tool = [meta + [tool: meta.tool == 'bracken' ? 'kraken2-bracken' : meta.tool], report]
+                }
+            )
+            ch_kraken2_reports = KRAKEN2_K2DAEMON.out.report
+        } else {
+            // Use standard KRAKEN2_KRAKEN2 for per-sample processing
+            ch_input_for_kraken2 = ch_prepare_for_kraken2.multiMap { it ->
+                reads: [it[0] + it[2], it[1]]
+                db: it[3]
             }
-        )
+
+            KRAKEN2_KRAKEN2(ch_input_for_kraken2.reads, ch_input_for_kraken2.db, params.kraken2_save_reads, params.kraken2_save_readclassifications)
+            ch_multiqc_files = ch_multiqc_files.mix(KRAKEN2_KRAKEN2.out.report)
+            ch_versions = ch_versions.mix(KRAKEN2_KRAKEN2.out.versions.first())
+            ch_raw_classifications = ch_raw_classifications.mix(KRAKEN2_KRAKEN2.out.classified_reads_assignment)
+            ch_raw_profiles = ch_raw_profiles.mix(
+                KRAKEN2_KRAKEN2.out.report.map { meta, report ->
+                    def new_tool = [meta + [tool: meta.tool == 'bracken' ? 'kraken2-bracken' : meta.tool], report]
+                }
+            )
+            ch_kraken2_reports = KRAKEN2_KRAKEN2.out.report
+        }
     }
 
     if (params.run_kraken2 && params.run_bracken) {
         // Remove files from 'pure' kraken2 runs, so only those aligned against Bracken & kraken2 database are used.
-        ch_kraken2_output = KRAKEN2_KRAKEN2.out.report
+        ch_kraken2_output = ch_kraken2_reports
 
         // If necessary, convert the eight column output to six column output.
         if (params.kraken2_save_minimizers) {
