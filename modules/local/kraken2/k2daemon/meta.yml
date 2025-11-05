@@ -1,0 +1,115 @@
+name: k2daemon
+description: Classifies metagenomic sequence data using Kraken2 daemon mode for efficient batch processing
+keywords:
+  - classify
+  - metagenomics
+  - fastq
+  - db
+  - daemon
+  - batch
+tools:
+  - kraken2:
+      description: |
+        Kraken2 is a taxonomic sequence classifier that assigns taxonomic labels to sequence reads.
+        This module uses the k2 script with daemon mode to keep the database in memory across
+        multiple sample classifications, avoiding repeated database loading overhead.
+      homepage: https://ccb.jhu.edu/software/kraken2/
+      documentation: https://github.com/DerrickWood/kraken2/wiki/Manual
+      doi: 10.1186/s13059-019-1891-0
+      licence: ["MIT"]
+      identifier: biotools:kraken2
+input:
+  - - meta:
+        type: map
+        description: |
+          Groovy Map containing batch-level information including database metadata.
+          The single_end field applies to all samples in the batch.
+          e.g. [ id:'batch_id', single_end:false, db_name:'kraken2_db' ]
+    - reads:
+        type: file
+        description: |
+          List of input FastQ files for all samples in the batch.
+          For single-end: one file per sample.
+          For paired-end: two files per sample (R1, R2 pairs in order).
+        ontologies: []
+    - prefixes:
+        type: list
+        description: |
+          List of sample prefixes/identifiers for output file naming.
+          Each prefix corresponds to one sample in the batch.
+  - db:
+      type: directory
+      description: Kraken2 database
+  - save_output_fastqs:
+      type: boolean
+      description: |
+        If true, classified and unclassified reads are saved as fastq files
+        for each sample in the batch
+  - save_reads_assignment:
+      type: boolean
+      description: |
+        If true, a file reporting the taxonomic classification of each input read
+        is saved for each sample in the batch
+output:
+  classified_reads_fastq:
+    - - meta:
+          type: map
+          description: |
+            Groovy Map containing batch-level information
+            e.g. [ id:'batch_id', single_end:false ]
+      - "*.classified{.,_}*":
+          type: file
+          description: |
+            Reads classified as belonging to any of the taxa
+            on the Kraken2 database (one file per sample in batch).
+          pattern: "*{fastq.gz}"
+          ontologies: []
+  unclassified_reads_fastq:
+    - - meta:
+          type: map
+          description: |
+            Groovy Map containing batch-level information
+            e.g. [ id:'batch_id', single_end:false ]
+      - "*.unclassified{.,_}*":
+          type: file
+          description: |
+            Reads not classified to any of the taxa
+            on the Kraken2 database (one file per sample in batch).
+          pattern: "*{fastq.gz}"
+          ontologies: []
+  classified_reads_assignment:
+    - - meta:
+          type: map
+          description: |
+            Groovy Map containing batch-level information
+            e.g. [ id:'batch_id', single_end:false ]
+      - "*classifiedreads.txt":
+          type: file
+          description: |
+            Kraken2 output file indicating the taxonomic assignment of
+            each input read (one file per sample in batch)
+          ontologies: []
+  report:
+    - - meta:
+          type: map
+          description: |
+            Groovy Map containing batch-level information
+            e.g. [ id:'batch_id', single_end:false ]
+      - "*report.txt":
+          type: file
+          description: |
+            Kraken2 report containing stats about classified
+            and not classified reads (one file per sample in batch).
+          pattern: "*.{report.txt}"
+          ontologies: []
+  versions:
+    - versions.yml:
+        type: file
+        description: File containing software versions
+        pattern: "versions.yml"
+        ontologies:
+          - edam: http://edamontology.org/format_3750 # YAML
+authors:
+  - "@your-github-handle"
+maintainers:
+  - "@your-github-handle"
