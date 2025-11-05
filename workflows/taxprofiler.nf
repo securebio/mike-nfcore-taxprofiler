@@ -9,16 +9,23 @@ include { paramsSummaryMap       } from 'plugin/nf-schema'
 include { paramsSummaryMultiqc   } from '../subworkflows/nf-core/utils_nfcore_pipeline'
 include { softwareVersionsToYAML } from '../subworkflows/nf-core/utils_nfcore_pipeline'
 include { methodsDescriptionText } from '../subworkflows/local/utils_nfcore_taxprofiler_pipeline'
+include { DOWNLOAD_PUBLIC_S3     } from '../modules/local/download_public_s3'
 
 // Check input path parameters to see if they exist
-def checkPathParamList = [ params.input, params.databases,
-                            params.longread_hostremoval_index,
-                            params.hostremoval_reference, params.shortread_hostremoval_index,
-                            params.multiqc_config, params.shortread_qc_adapterlist,
-                            params.krona_taxonomy_directory,
-                            params.taxpasta_taxonomy_dir,
-                            params.multiqc_logo, params.multiqc_methods_description
-                        ]
+// Skip checking public S3 paths as they will be downloaded later
+def checkPathParamList = [
+    params.input,
+    params.databases,
+    (params.longread_hostremoval_index && !(params.longread_hostremoval_index_is_public && params.longread_hostremoval_index.startsWith('s3://'))) ? params.longread_hostremoval_index : null,
+    (params.hostremoval_reference && !(params.hostremoval_reference_is_public && params.hostremoval_reference.startsWith('s3://'))) ? params.hostremoval_reference : null,
+    params.shortread_hostremoval_index,
+    params.multiqc_config,
+    params.shortread_qc_adapterlist,
+    params.krona_taxonomy_directory,
+    params.taxpasta_taxonomy_dir,
+    params.multiqc_logo,
+    params.multiqc_methods_description
+]
 for (param in checkPathParamList) { if (param) { file(param, checkIfExists: true) } }
 
 // Check mandatory parameters
@@ -39,9 +46,25 @@ if (params.perform_shortread_hostremoval && !params.hostremoval_reference) { err
 if (params.perform_shortread_hostremoval && !params.hostremoval_reference && params.shortread_hostremoval_index) { error("ERROR: [nf-core/taxprofiler] --shortread_hostremoval_index provided but no --hostremoval_reference FASTA supplied. Check input.") }
 if (params.perform_longread_hostremoval && !params.hostremoval_reference && params.longread_hostremoval_index) { error("ERROR: [nf-core/taxprofiler] --longread_hostremoval_index provided but no --hostremoval_reference FASTA supplied. Check input.") }
 
-if (params.hostremoval_reference           ) { ch_reference = file(params.hostremoval_reference) }
+// Handle hostremoval reference - download if it's a public S3 path
+if (params.hostremoval_reference) {
+    if (params.hostremoval_reference_is_public && params.hostremoval_reference.startsWith('s3://')) {
+        ch_reference = Channel.empty()  // Will be set after download
+    } else {
+        ch_reference = file(params.hostremoval_reference)
+    }
+}
 if (params.shortread_hostremoval_index     ) { ch_shortread_reference_index = Channel.fromPath(params.shortread_hostremoval_index).map{[[], it]} } else { ch_shortread_reference_index = [] }
-if (params.longread_hostremoval_index      ) { ch_longread_reference_index  = file(params.longread_hostremoval_index     ) } else { ch_longread_reference_index  = [] }
+// Handle longread index - download if it's a public S3 path
+if (params.longread_hostremoval_index) {
+    if (params.longread_hostremoval_index_is_public && params.longread_hostremoval_index.startsWith('s3://')) {
+        ch_longread_reference_index = Channel.empty()  // Will be set after download
+    } else {
+        ch_longread_reference_index = file(params.longread_hostremoval_index)
+    }
+} else {
+    ch_longread_reference_index = []
+}
 
 if (params.diamond_save_reads              ) log.warn "[nf-core/taxprofiler] DIAMOND only allows output of a single format. As --diamond_save_reads supplied, only aligned reads in SAM format will be produced, no taxonomic profiles will be available."
 
@@ -107,6 +130,16 @@ workflow TAXPROFILER {
 
     ch_versions = Channel.empty()
     ch_multiqc_files = Channel.empty()
+
+    // Download public S3 files if needed
+    if (params.hostremoval_reference_is_public && params.hostremoval_reference && params.hostremoval_reference.startsWith('s3://')) {
+        ch_reference = DOWNLOAD_PUBLIC_S3(params.hostremoval_reference).file
+        ch_versions = ch_versions.mix(DOWNLOAD_PUBLIC_S3.out.versions)
+    }
+    if (params.longread_hostremoval_index_is_public && params.longread_hostremoval_index && params.longread_hostremoval_index.startsWith('s3://')) {
+        ch_longread_reference_index = DOWNLOAD_PUBLIC_S3(params.longread_hostremoval_index).file
+        ch_versions = ch_versions.mix(DOWNLOAD_PUBLIC_S3.out.versions)
+    }
 
     // Validate input files and create separate channels for FASTQ, FASTA, and Nanopore data
     ch_input = samplesheet

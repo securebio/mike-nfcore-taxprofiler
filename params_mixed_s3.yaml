@@ -1,0 +1,27 @@
+# Example params file demonstrating mixed public and private S3 paths
+# This configuration uses authenticated access for private S3 paths and
+# downloads public S3 files explicitly with --no-sign-request
+
+input: "./samplesheet.csv"
+databases: "./databases.csv"
+outdir: "./results/"
+email: "mike@securebio.org"
+
+# Preprocessing options
+preprocessing_qc_tool: "falco"
+perform_longread_qc: true
+perform_longread_hostremoval: true
+
+# Host removal with mixed S3 paths
+# Public S3 path - will be downloaded with --no-sign-request
+hostremoval_reference: "s3://human-pangenomics/T2T/CHM13/assemblies/analysis_set/chm13v2.0.fa.gz"
+hostremoval_reference_is_public: true
+
+# Private S3 path - will use authenticated AWS access
+longread_hostremoval_index: "s3://nao-mgs-index/20250825/output/results/mm2-human-index/mm2_index.mmi"
+longread_hostremoval_index_is_public: false
+
+save_hostremoval_index: true
+
+# Profiling options
+run_kraken2: true
