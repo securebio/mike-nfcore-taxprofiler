@@ -45,9 +45,13 @@
             },
             "db_path": {
                 "type": "string",
-                "exists": true,
                 "format": "path",
                 "errorMessage": "db_path should be either a file path or a directory."
+            },
+            "db_path_is_public": {
+                "type": "boolean",
+                "default": false,
+                "errorMessage": "db_path_is_public should be true if the database is on a public S3 bucket requiring anonymous access."
             }
         },
         "required": ["tool", "db_name", "db_path"]

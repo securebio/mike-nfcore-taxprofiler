@@ -2,7 +2,7 @@
 
 ## Problem
 
-Some public S3 buckets (like `human-pangenomics`) have bucket policies that:
+Some public S3 buckets (like `human-pangenomics` or public Kraken2 databases) have bucket policies that:
 - Allow anonymous LIST operations
 - Allow anonymous GET operations (downloads)
 - **Explicitly deny** authenticated GET requests
@@ -13,17 +13,27 @@ This means these buckets can only be accessed with `--no-sign-request` flag in A
 
 This pipeline now supports marking specific S3 paths as "public" so they will be downloaded explicitly with `--no-sign-request`, while other S3 paths use your authenticated AWS credentials.
 
+This works for:
+- Host removal reference genomes (`hostremoval_reference`)
+- Host removal indexes (`longread_hostremoval_index`)
+- **Database paths in databases.csv** (Kraken2, Centrifuge, etc.)
+
 ## Usage
 
 ### New Parameters
 
-Two new boolean parameters have been added:
+**For params.yaml or command line:**
 
 - `hostremoval_reference_is_public`: Set to `true` if the host removal reference is a public S3 path that requires anonymous access
 - `longread_hostremoval_index_is_public`: Set to `true` if the longread host removal index is a public S3 path that requires anonymous access
 
+**For databases.csv:**
+
+- `db_path_is_public`: New column in databases.csv. Set to `true` for databases on public S3 buckets that require anonymous access
+
 ### Example Configuration
 
+**params.yaml:**
 ```yaml
 # params.yaml
 input: "./samplesheet.csv"
@@ -39,7 +49,20 @@ longread_hostremoval_index: "s3://your-private-bucket/path/to/index.mmi"
 longread_hostremoval_index_is_public: false
 
 perform_longread_hostremoval: true
+run_kraken2: true
 ```
+
+**databases.csv:**
+```csv
+tool,db_name,db_params,db_path,db_path_is_public
+kraken2,public_k2_standard,,s3://genome-idx/kraken/k2_standard_20220607.tar.gz,true
+kraken2,private_custom,,s3://my-private-bucket/databases/my_kraken2_db.tar.gz,false
+```
+
+In this example:
+- The `public_k2_standard` database will be downloaded using `--no-sign-request`
+- The `private_custom` database will use your AWS credentials
+- The `db_path_is_public` column is optional and defaults to `false` if omitted
 
 ### Command Line Usage
 

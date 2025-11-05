@@ -11,7 +11,7 @@ process DOWNLOAD_PUBLIC_S3 {
     val s3_uri
 
     output:
-    path "downloaded_file", emit: file
+    tuple val(s3_uri), path("downloaded_file"), emit: file
     path "versions.yml", emit: versions
 
     when:

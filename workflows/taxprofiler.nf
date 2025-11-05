@@ -133,11 +133,11 @@ workflow TAXPROFILER {
 
     // Download public S3 files if needed
     if (params.hostremoval_reference_is_public && params.hostremoval_reference && params.hostremoval_reference.startsWith('s3://')) {
-        ch_reference = DOWNLOAD_PUBLIC_S3(params.hostremoval_reference).file
+        ch_reference = DOWNLOAD_PUBLIC_S3(params.hostremoval_reference).file.map { s3_uri, file -> file }
         ch_versions = ch_versions.mix(DOWNLOAD_PUBLIC_S3.out.versions)
     }
     if (params.longread_hostremoval_index_is_public && params.longread_hostremoval_index && params.longread_hostremoval_index.startsWith('s3://')) {
-        ch_longread_reference_index = DOWNLOAD_PUBLIC_S3(params.longread_hostremoval_index).file
+        ch_longread_reference_index = DOWNLOAD_PUBLIC_S3(params.longread_hostremoval_index).file.map { s3_uri, file -> file }
         ch_versions = ch_versions.mix(DOWNLOAD_PUBLIC_S3.out.versions)
     }
 
@@ -181,8 +181,38 @@ workflow TAXPROFILER {
     // Merge ch_input.fastq and ch_input.nanopore into a single channel
     ch_input_for_fastqc = ch_input.fastq.mix( ch_input.nanopore )
 
+    // Download public S3 databases if needed
+    ch_databases_branched = databases
+        .branch { db_meta, db_path ->
+            public_s3: db_meta.db_path_is_public && db_path.toString().startsWith('s3://')
+                return [ db_meta, db_path.toString() ]
+            regular: true
+                return [ db_meta, db_path ]
+        }
+
+    // Download public databases - use S3 path as key for deduplication
+    ch_public_s3_for_download = ch_databases_branched.public_s3
+        .map { db_meta, s3_path -> [ s3_path, db_meta ] }
+        .groupTuple()  // Group all db_metas that use the same S3 path
+        .map { s3_path, db_metas -> s3_path }  // Extract unique S3 paths
+
+    DOWNLOAD_PUBLIC_S3( ch_public_s3_for_download )
+    ch_versions = ch_versions.mix(DOWNLOAD_PUBLIC_S3.out.versions)
+
+    // Join downloaded files back with metadata using S3 path as key
+    // DOWNLOAD_PUBLIC_S3.out.file is now [ s3_uri, downloaded_file ]
+    ch_public_dbs_with_meta = ch_databases_branched.public_s3
+        .map { db_meta, s3_path -> [ s3_path, db_meta ] }
+        .join( DOWNLOAD_PUBLIC_S3.out.file )
+        .map { s3_path, db_meta, downloaded_file ->
+            [ db_meta, downloaded_file ]
+        }
+
+    // Combine regular and downloaded public databases
+    ch_all_databases = ch_databases_branched.regular.mix(ch_public_dbs_with_meta)
+
     // Validate and decompress databases
-    ch_dbs_for_untar = databases
+    ch_dbs_for_untar = ch_all_databases
         .branch { db_meta, db_path ->
             if ( !db_meta.db_type ) {
                 db_meta = db_meta + [ db_type: "short;long" ]
