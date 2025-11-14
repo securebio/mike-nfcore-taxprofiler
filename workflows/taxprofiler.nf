@@ -9,16 +9,23 @@ include { paramsSummaryMap       } from 'plugin/nf-schema'
 include { paramsSummaryMultiqc   } from '../subworkflows/nf-core/utils_nfcore_pipeline'
 include { softwareVersionsToYAML } from '../subworkflows/nf-core/utils_nfcore_pipeline'
 include { methodsDescriptionText } from '../subworkflows/local/utils_nfcore_taxprofiler_pipeline'
+include { DOWNLOAD_PUBLIC_S3     } from '../modules/local/download_public_s3'
 
 // Check input path parameters to see if they exist
-def checkPathParamList = [ params.input, params.databases,
-                            params.longread_hostremoval_index,
-                            params.hostremoval_reference, params.shortread_hostremoval_index,
-                            params.multiqc_config, params.shortread_qc_adapterlist,
-                            params.krona_taxonomy_directory,
-                            params.taxpasta_taxonomy_dir,
-                            params.multiqc_logo, params.multiqc_methods_description
-                        ]
+// Skip checking public S3 paths as they will be downloaded later
+def checkPathParamList = [
+    params.input,
+    params.databases,
+    (params.longread_hostremoval_index && !(params.longread_hostremoval_index_is_public && params.longread_hostremoval_index.startsWith('s3://'))) ? params.longread_hostremoval_index : null,
+    (params.hostremoval_reference && !(params.hostremoval_reference_is_public && params.hostremoval_reference.startsWith('s3://'))) ? params.hostremoval_reference : null,
+    params.shortread_hostremoval_index,
+    params.multiqc_config,
+    params.shortread_qc_adapterlist,
+    params.krona_taxonomy_directory,
+    params.taxpasta_taxonomy_dir,
+    params.multiqc_logo,
+    params.multiqc_methods_description
+]
 for (param in checkPathParamList) { if (param) { file(param, checkIfExists: true) } }
 
 // Check mandatory parameters
@@ -39,9 +46,25 @@ if (params.perform_shortread_hostremoval && !params.hostremoval_reference) { err
 if (params.perform_shortread_hostremoval && !params.hostremoval_reference && params.shortread_hostremoval_index) { error("ERROR: [nf-core/taxprofiler] --shortread_hostremoval_index provided but no --hostremoval_reference FASTA supplied. Check input.") }
 if (params.perform_longread_hostremoval && !params.hostremoval_reference && params.longread_hostremoval_index) { error("ERROR: [nf-core/taxprofiler] --longread_hostremoval_index provided but no --hostremoval_reference FASTA supplied. Check input.") }
 
-if (params.hostremoval_reference           ) { ch_reference = file(params.hostremoval_reference) }
+// Handle hostremoval reference - download if it's a public S3 path
+if (params.hostremoval_reference) {
+    if (params.hostremoval_reference_is_public && params.hostremoval_reference.startsWith('s3://')) {
+        ch_reference = Channel.empty()  // Will be set after download
+    } else {
+        ch_reference = file(params.hostremoval_reference)
+    }
+}
 if (params.shortread_hostremoval_index     ) { ch_shortread_reference_index = Channel.fromPath(params.shortread_hostremoval_index).map{[[], it]} } else { ch_shortread_reference_index = [] }
-if (params.longread_hostremoval_index      ) { ch_longread_reference_index  = file(params.longread_hostremoval_index     ) } else { ch_longread_reference_index  = [] }
+// Handle longread index - download if it's a public S3 path
+if (params.longread_hostremoval_index) {
+    if (params.longread_hostremoval_index_is_public && params.longread_hostremoval_index.startsWith('s3://')) {
+        ch_longread_reference_index = Channel.empty()  // Will be set after download
+    } else {
+        ch_longread_reference_index = file(params.longread_hostremoval_index)
+    }
+} else {
+    ch_longread_reference_index = []
+}
 
 if (params.diamond_save_reads              ) log.warn "[nf-core/taxprofiler] DIAMOND only allows output of a single format. As --diamond_save_reads supplied, only aligned reads in SAM format will be produced, no taxonomic profiles will be available."
 
@@ -108,6 +131,16 @@ workflow TAXPROFILER {
     ch_versions = Channel.empty()
     ch_multiqc_files = Channel.empty()
 
+    // Download public S3 files if needed
+    if (params.hostremoval_reference_is_public && params.hostremoval_reference && params.hostremoval_reference.startsWith('s3://')) {
+        ch_reference = DOWNLOAD_PUBLIC_S3(params.hostremoval_reference).file.map { s3_uri, file -> file }
+        ch_versions = ch_versions.mix(DOWNLOAD_PUBLIC_S3.out.versions)
+    }
+    if (params.longread_hostremoval_index_is_public && params.longread_hostremoval_index && params.longread_hostremoval_index.startsWith('s3://')) {
+        ch_longread_reference_index = DOWNLOAD_PUBLIC_S3(params.longread_hostremoval_index).file.map { s3_uri, file -> file }
+        ch_versions = ch_versions.mix(DOWNLOAD_PUBLIC_S3.out.versions)
+    }
+
     // Validate input files and create separate channels for FASTQ, FASTA, and Nanopore data
     ch_input = samplesheet
         .map { meta, run_accession, instrument_platform, fastq_1, fastq_2, fasta ->
@@ -148,8 +181,38 @@ workflow TAXPROFILER {
     // Merge ch_input.fastq and ch_input.nanopore into a single channel
     ch_input_for_fastqc = ch_input.fastq.mix( ch_input.nanopore )
 
+    // Download public S3 databases if needed
+    ch_databases_branched = databases
+        .branch { db_meta, db_path ->
+            public_s3: db_meta.db_path_is_public && db_path.toString().startsWith('s3://')
+                return [ db_meta, db_path.toString() ]
+            regular: true
+                return [ db_meta, db_path ]
+        }
+
+    // Download public databases - use S3 path as key for deduplication
+    ch_public_s3_for_download = ch_databases_branched.public_s3
+        .map { db_meta, s3_path -> [ s3_path, db_meta ] }
+        .groupTuple()  // Group all db_metas that use the same S3 path
+        .map { s3_path, db_metas -> s3_path }  // Extract unique S3 paths
+
+    DOWNLOAD_PUBLIC_S3( ch_public_s3_for_download )
+    ch_versions = ch_versions.mix(DOWNLOAD_PUBLIC_S3.out.versions)
+
+    // Join downloaded files back with metadata using S3 path as key
+    // DOWNLOAD_PUBLIC_S3.out.file is now [ s3_uri, downloaded_file ]
+    ch_public_dbs_with_meta = ch_databases_branched.public_s3
+        .map { db_meta, s3_path -> [ s3_path, db_meta ] }
+        .join( DOWNLOAD_PUBLIC_S3.out.file )
+        .map { s3_path, db_meta, downloaded_file ->
+            [ db_meta, downloaded_file ]
+        }
+
+    // Combine regular and downloaded public databases
+    ch_all_databases = ch_databases_branched.regular.mix(ch_public_dbs_with_meta)
+
     // Validate and decompress databases
-    ch_dbs_for_untar = databases
+    ch_dbs_for_untar = ch_all_databases
         .branch { db_meta, db_path ->
             if ( !db_meta.db_type ) {
                 db_meta = db_meta + [ db_type: "short;long" ]

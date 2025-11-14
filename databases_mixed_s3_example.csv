@@ -1,0 +1,3 @@
+tool,db_name,db_params,db_path,db_path_is_public
+kraken2,public_k2_standard,,s3://genome-idx/kraken/k2_standard_20220607.tar.gz,true
+kraken2,private_custom,,s3://my-private-bucket/databases/my_kraken2_db.tar.gz,false
