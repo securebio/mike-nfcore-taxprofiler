@@ -2,27 +2,71 @@
 
 ## Executive Summary
 
-Add MEGAN-LR-nuc-ONT taxonomic profiling to nf-core/taxprofiler following established patterns. This workflow uses minimap2 for long-read alignment against taxonomic databases, with optional MEGAN post-processing for taxonomic profile extraction.
+Add MEGAN-LR-nuc-ONT taxonomic profiling to nf-core/taxprofiler following the Bracken pattern. This workflow uses minimap2 for long-read alignment against taxonomic databases, with optional MEGAN post-processing for taxonomic profile extraction.
 
-## Key Design Decisions (Based on All Feedback)
+## Key Design Decisions
 
-### Database Handling (CRITICAL CHANGE)
-- **Pattern**: Follow standard taxonomic profiler pattern, NOT host removal pattern
-- **Requirement**: Users must provide **pre-built databases** via `databases.csv`
-- **No automatic index building**: Unlike host removal, we will not build minimap2 indices on-the-fly
-- **Database structure**: db_path points to a directory containing:
-  - Pre-built minimap2 index (.mmi file)
-  - MEGAN nucleotide mapping database (.db file) - only needed if using MEGAN post-processing
+### Database Handling - Following Bracken Pattern
+
+**Two-line approach in databases.csv:**
+- **`minimap2`** entries: Runs minimap2 alignment, produces SAM files
+- **`meganlr`** entries: Runs MEGAN post-processing (sam2rma → rma2info) on minimap2 output matched by `db_name`
+
+This exactly mirrors how Bracken works:
+- **`kraken2`** entries: Runs classification, produces reports
+- **`bracken`** entries: Runs Bracken on kraken2 output matched by `db_name`
+
+**Example databases.csv:**
+```csv
+tool,db_name,db_params,db_path
+minimap2,nt_ont,,/path/to/nt_ont.mmi
+meganlr,nt_ont,,/path/to/megan-nucl-Jan2021.db
+```
+
+### Use Cases
+
+**Case 1: Minimap2 alignment only (no MEGAN)**
+```csv
+tool,db_name,db_params,db_path
+minimap2,nt_ont,,/path/to/nt_ont.mmi
+minimap2,refseq,,/path/to/refseq.mmi
+```
+→ Produces SAM alignments for both databases
+
+**Case 2: Full MEGAN-LR pipeline**
+```csv
+tool,db_name,db_params,db_path
+minimap2,nt_ont,,/path/to/nt_ont.mmi
+meganlr,nt_ont,,/path/to/megan-nucl-Jan2021.db
+```
+→ Produces taxonomic profiles from nt_ont
+
+**Case 3: Mixed - MEGAN on some, minimap2-only on others**
+```csv
+tool,db_name,db_params,db_path
+minimap2,nt_ont,,/path/to/nt_ont.mmi
+minimap2,refseq,,/path/to/refseq.mmi
+meganlr,nt_ont,,/path/to/megan-nucl-Jan2021.db
+```
+→ Full MEGAN-LR on nt_ont, SAM alignments only from refseq
+
+**Case 4: Multiple taxonomic levels (like Bracken)**
+```csv
+tool,db_name,db_params,db_path
+minimap2,nt_ont,,/path/to/nt_ont.mmi
+meganlr,nt_ont_species,-c2c Taxonomy,/path/to/megan-map.db
+meganlr,nt_ont_genus,-c2c Taxonomy --majorRanksOnly,/path/to/megan-map.db
+```
+→ Produces profiles at different taxonomic levels
 
 ### Other Design Principles
+
 1. **Reuse existing modules**: Use `modules/nf-core/minimap2/align/`
 2. **New modules**: Create `modules/local/megan/sam2rma/` (follows local module pattern)
 3. **Integration**: Add to existing `subworkflows/local/profiling.nf`
 4. **Flexibility**: Support general reference databases, not just NCBI nt
-5. **Modularity**:
-   - Can run minimap2 only (saves SAM/BAM alignments)
-   - Can run full MEGAN-LR pipeline (minimap2 → sam2rma → rma2info)
-   - Can optionally use taxpasta for standardization
+5. **No automatic index building**: Users must provide pre-built minimap2 indices
+6. **Modularity**: Presence of `meganlr` entries determines MEGAN processing (like Bracken)
 
 ## Implementation Phases
 
@@ -36,8 +80,11 @@ None - reuse existing nf-core modules.
 #### Files to Modify
 
 **1. `assets/schema_database.json`**
+
+Add both `minimap2` and `meganlr` to the tool enum:
+
 ```json
-// Line 12-24: Add to tool enum
+// Line 12-24: Update tool enum
 "enum": [
     "bracken",
     "centrifuge",
@@ -50,23 +97,29 @@ None - reuse existing nf-core modules.
     "malt",
     "meganlr",      // <- ADD THIS
     "metaphlan",
+    "minimap2",     // <- ADD THIS
     "motus"
 ],
 // Line 25: Update error message
-"errorMessage": "Invalid tool name. Please see documentation for all supported profilers. Currently these classifiers are included: bracken, centrifuge, diamond, ganon, kaiju, kmcp, kraken2, krakenuniq, malt, meganlr, metaphlan, motus.",
+"errorMessage": "Invalid tool name. Please see documentation for all supported profilers. Currently these classifiers are included: bracken, centrifuge, diamond, ganon, kaiju, kmcp, kraken2, krakenuniq, malt, meganlr, metaphlan, minimap2, motus.",
 ```
 
 **2. `nextflow.config`**
+
 ```groovy
 // Add after ganon parameters (around line 179):
 
-// MEGAN-LR
-run_meganlr                    = false
-meganlr_save_alignment         = false      // Save minimap2 SAM output
-meganlr_run_megan              = false      // Run MEGAN post-processing (Phase 2)
+// Minimap2 (taxonomic profiling)
+run_minimap2                   = false
+minimap2_save_alignment        = false      // Save minimap2 SAM output
+
+// MEGAN-LR (requires minimap2)
+run_meganlr                    = false      // Run MEGAN post-processing
+meganlr_save_rma6              = false      // Save intermediate RMA6 files
 ```
 
 **3. `conf/modules.config`**
+
 ```groovy
 // Add after GANON_REPORT block (around line 675):
 
@@ -75,10 +128,10 @@ withName: 'PROFILING:MINIMAP2_ALIGN' {
     ext.args = { "${meta.db_params} -ax map-ont" }  // ONT-specific alignment
     ext.prefix = { "${meta.id}_${meta.db_name}" }
     publishDir = [
-        path: { "${params.outdir}/meganlr/${meta.db_name}/" },
+        path: { "${params.outdir}/minimap2/${meta.db_name}/" },
         mode: params.publish_dir_mode,
         pattern: '*.sam',
-        enabled: params.meganlr_save_alignment
+        enabled: params.minimap2_save_alignment
     ]
 }
 ```
@@ -91,36 +144,30 @@ Add minimap2 import:
 include { MINIMAP2_ALIGN                                } from '../../modules/nf-core/minimap2/align/main'
 ```
 
-Add branching logic:
+Add branching logic (like kraken2/bracken):
 ```groovy
-// Line 98: Add after ganon branch
-meganlr: db_meta.tool == 'meganlr'
+// Line 98: Update ganon branch and add minimap2
+ganon: db_meta.tool == 'ganon'
+minimap2: db_meta.tool == 'minimap2' || db_meta.tool == 'meganlr'
 ```
 
-Add minimap2 profiling block:
+Add minimap2 profiling block (after ganon block, around line 506):
 ```groovy
-// Add after ganon block (around line 506):
+if (params.run_minimap2) {
 
-if (params.run_meganlr) {
-
-    ch_input_for_minimap2 = ch_input_for_profiling.meganlr
+    ch_input_for_minimap2 = ch_input_for_profiling.minimap2
+        .filter { meta, reads, db_meta, db ->
+            // Only process minimap2 entries here, not meganlr
+            db_meta.tool == 'minimap2'
+        }
         .multiMap { meta, reads, db_meta, db ->
             reads: [meta + db_meta, reads]
             db: [[id: db_meta.db_name], db]
         }
 
-    // Find the minimap2 index file in the database directory
-    ch_minimap2_db = ch_input_for_minimap2.db
-        .map { meta, db_path ->
-            // If db_path is a directory, find .mmi file; if it's a file, use it directly
-            def index_file = db_path.isDirectory() ?
-                file("${db_path}/*.mmi").first() : db_path
-            [meta, index_file]
-        }
-
     MINIMAP2_ALIGN(
         ch_input_for_minimap2.reads,
-        ch_minimap2_db,
+        ch_input_for_minimap2.db,
         false,  // bam_format (false = SAM output)
         false,  // bam_index_extension
         false,  // cigar_paf_format
@@ -136,43 +183,30 @@ if (params.run_meganlr) {
 
 Users specify in `databases.csv`:
 
-**Option 1: Database directory with index:**
 ```csv
 tool,db_name,db_params,db_path
-meganlr,nt_ont,-k 15,/path/to/meganlr_db/
-```
-
-Expected directory structure:
-```
-/path/to/meganlr_db/
-├── nt_ont.mmi              # Pre-built minimap2 index
-└── megan-map-Jan2021.db    # MEGAN mapping (for Phase 2)
-```
-
-**Option 2: Direct path to index file:**
-```csv
-tool,db_name,db_params,db_path
-meganlr,nt_ont,-k 15,/path/to/nt_ont.mmi
+minimap2,nt_ont,,/path/to/nt_ont.mmi
+minimap2,refseq_ont,,/path/to/refseq_ont.mmi
 ```
 
 **Note on db_params**:
-- For Phase 1, db_params can include additional minimap2 alignment parameters
+- Can include additional minimap2 alignment parameters
 - The `-ax map-ont` is set by default in modules.config but can be overridden
 - Example: `db_params="-k 15 -w 5"` for custom k-mer/window settings
 
 #### Testing (Phase 1)
-- [ ] Pipeline accepts meganlr in databases.csv
+- [ ] Pipeline accepts `minimap2` in databases.csv
 - [ ] Minimap2 aligns ONT reads against taxonomic database
 - [ ] SAM output generated with correct naming
-- [ ] Optional SAM saving works (meganlr_save_alignment=true)
-- [ ] Works with both directory and file paths
+- [ ] Optional SAM saving works (minimap2_save_alignment=true)
+- [ ] Works with both .mmi files and directory paths
 - [ ] Custom db_params override defaults correctly
 
 ---
 
 ### Phase 2: MEGAN Post-Processing (sam2rma + rma2info)
 
-Add MEGAN tools to convert alignments to taxonomic profiles.
+Add MEGAN tools to convert minimap2 alignments to taxonomic profiles, following the Bracken pattern.
 
 #### Files to Create
 
@@ -287,19 +321,82 @@ authors:
 
 #### Files to Modify
 
-**1. `nextflow.config`**
+**1. `subworkflows/local/profiling.nf`**
+
+Add imports:
 ```groovy
-// Add to MEGAN-LR section (after meganlr_run_megan):
-meganlr_save_rma6              = false      // Save intermediate RMA6 files
+// Line 6: Add after MEGAN_RMA2INFO_TSV
+include { MEGAN_RMA2INFO as MEGAN_RMA2INFO_MEGANLR     } from '../../modules/nf-core/megan/rma2info/main'
+include { MEGAN_SAM2RMA                                } from '../../modules/local/megan/sam2rma'
+```
+
+Extend minimap2 block to handle MEGAN processing (following Bracken pattern):
+```groovy
+if (params.run_minimap2) {
+
+    ch_input_for_minimap2 = ch_input_for_profiling.minimap2
+        .filter { meta, reads, db_meta, db ->
+            // Only process minimap2 entries here, not meganlr
+            db_meta.tool == 'minimap2'
+        }
+        .multiMap { meta, reads, db_meta, db ->
+            reads: [meta + db_meta, reads]
+            db: [[id: db_meta.db_name], db]
+        }
+
+    MINIMAP2_ALIGN(
+        ch_input_for_minimap2.reads,
+        ch_input_for_minimap2.db,
+        false, false, false, false
+    )
+
+    ch_versions = ch_versions.mix(MINIMAP2_ALIGN.out.versions.first())
+    ch_raw_classifications = ch_raw_classifications.mix(MINIMAP2_ALIGN.out.paf)
+}
+
+if (params.run_minimap2 && params.run_meganlr) {
+    // Extract meganlr databases from the database channel, keyed by db_name
+    // This is analogous to how Bracken extracts bracken databases (profiling.nf:210-212)
+    ch_meganlr_databases = databases
+        .filter { meta, db -> meta.tool == 'meganlr' }
+        .map { meta, db -> [meta.db_name, meta, db] }
+
+    // Combine minimap2 SAM output with meganlr databases by db_name
+    // This is analogous to Bracken combining kraken2 reports with bracken databases (profiling.nf:215-218)
+    ch_input_for_meganlr = MINIMAP2_ALIGN.out.paf
+        .map { meta, sam -> [meta.db_name, meta, sam] }
+        .combine(ch_meganlr_databases, by: 0)
+        .map { key, meta, sam, db_meta, db ->
+            // Merge db_meta params into meta (like Bracken does)
+            def db_meta_keys = db_meta.keySet()
+            def db_meta_new = db_meta.subMap(db_meta_keys)
+            [key, meta, sam, db_meta_new, db]
+        }
+        .multiMap { key, meta, sam, db_meta, db ->
+            sam: [meta + db_meta, sam]
+            db: db
+        }
+
+    MEGAN_SAM2RMA(ch_input_for_meganlr.sam, ch_input_for_meganlr.db)
+    MEGAN_RMA2INFO_MEGANLR(MEGAN_SAM2RMA.out.rma6, false)
+
+    ch_versions = ch_versions.mix(
+        MEGAN_SAM2RMA.out.versions.first(),
+        MEGAN_RMA2INFO_MEGANLR.out.versions.first()
+    )
+    ch_raw_classifications = ch_raw_classifications.mix(MEGAN_SAM2RMA.out.rma6)
+    ch_raw_profiles = ch_raw_profiles.mix(MEGAN_RMA2INFO_MEGANLR.out.txt)
+}
 ```
 
 **2. `conf/modules.config`**
+
 ```groovy
 // Add after MINIMAP2_ALIGN block:
 
 withName: 'PROFILING:MEGAN_SAM2RMA' {
     tag = { "${meta.db_name}|${meta.id}" }
-    ext.args = ""  // Additional sam2rma args if needed
+    ext.args = { "${meta.db_params}" }
     ext.prefix = { "${meta.id}_${meta.db_name}" }
     publishDir = [
         path: { "${params.outdir}/meganlr/${meta.db_name}/" },
@@ -309,7 +406,7 @@ withName: 'PROFILING:MEGAN_SAM2RMA' {
     ]
 }
 
-withName: 'PROFILING:MEGAN_RMA2INFO' {
+withName: 'PROFILING:MEGAN_RMA2INFO_MEGANLR' {
     tag = { "${meta.db_name}|${meta.id}" }
     ext.args = "-c2c Taxonomy"
     ext.prefix = { "${meta.id}_${meta.db_name}" }
@@ -321,90 +418,17 @@ withName: 'PROFILING:MEGAN_RMA2INFO' {
 }
 ```
 
-**3. `subworkflows/local/profiling.nf`**
-
-Add import:
-```groovy
-// Line 6: Add after MEGAN_RMA2INFO_TSV
-include { MEGAN_RMA2INFO as MEGAN_RMA2INFO_MEGANLR     } from '../../modules/nf-core/megan/rma2info/main'
-include { MEGAN_SAM2RMA                                } from '../../modules/local/megan/sam2rma'
-```
-
-Modify minimap2 block (replace Phase 1 implementation):
-```groovy
-if (params.run_meganlr) {
-
-    ch_input_for_minimap2 = ch_input_for_profiling.meganlr
-        .multiMap { meta, reads, db_meta, db ->
-            reads: [meta + db_meta, reads]
-            db: [db_meta, db]
-        }
-
-    // Find the minimap2 index file in the database directory
-    ch_minimap2_db = ch_input_for_minimap2.db
-        .map { meta, db_path ->
-            def index_file = db_path.isDirectory() ?
-                file("${db_path}/*.mmi").first() : db_path
-            [[id: meta.db_name], index_file]
-        }
-
-    MINIMAP2_ALIGN(
-        ch_input_for_minimap2.reads,
-        ch_minimap2_db,
-        false,  // bam_format (false = SAM output)
-        false,  // bam_index_extension
-        false,  // cigar_paf_format
-        false   // cigar_bam
-    )
-
-    ch_versions = ch_versions.mix(MINIMAP2_ALIGN.out.versions.first())
-
-    // If MEGAN processing is enabled, run sam2rma and rma2info
-    if (params.meganlr_run_megan) {
-
-        // Find MEGAN mapping database
-        ch_megan_db = ch_input_for_minimap2.db
-            .map { meta, db_path ->
-                def megan_db = db_path.isDirectory() ?
-                    file("${db_path}/*.db").first() : null
-                if (megan_db == null) {
-                    error("MEGAN database (.db file) not found in ${db_path}. Required when meganlr_run_megan=true")
-                }
-                megan_db
-            }
-            .first()
-
-        MEGAN_SAM2RMA(MINIMAP2_ALIGN.out.paf, ch_megan_db)
-        MEGAN_RMA2INFO_MEGANLR(MEGAN_SAM2RMA.out.rma6, false)
-
-        ch_versions = ch_versions.mix(
-            MEGAN_SAM2RMA.out.versions.first(),
-            MEGAN_RMA2INFO_MEGANLR.out.versions.first()
-        )
-        ch_raw_classifications = ch_raw_classifications.mix(MEGAN_SAM2RMA.out.rma6)
-        ch_raw_profiles = ch_raw_profiles.mix(MEGAN_RMA2INFO_MEGANLR.out.txt)
-    } else {
-        // Only minimap2 alignment, output SAM as classification
-        ch_raw_classifications = ch_raw_classifications.mix(MINIMAP2_ALIGN.out.paf)
-    }
-}
-```
-
 #### Database Configuration (Phase 2)
 
-When using MEGAN post-processing (`meganlr_run_megan=true`), database directory must contain both files:
+When using MEGAN post-processing, add corresponding `meganlr` entries:
 
 ```csv
 tool,db_name,db_params,db_path
-meganlr,nt_ont,,/path/to/meganlr_db/
+minimap2,nt_ont,,/path/to/nt_ont.mmi
+meganlr,nt_ont,,/path/to/megan-nucl-Jan2021.db
 ```
 
-Expected directory structure:
-```
-/path/to/meganlr_db/
-├── nt_ont.mmi              # Pre-built minimap2 index (required)
-└── megan-map-Jan2021.db    # MEGAN nucleotide mapping (required for Phase 2)
-```
+The `db_name` must match between `minimap2` and `meganlr` entries for the pipeline to link them.
 
 #### Testing (Phase 2)
 - [ ] sam2rma converts minimap2 SAM to RMA6
@@ -412,8 +436,9 @@ Expected directory structure:
 - [ ] Output format matches MALT output (megan6 format)
 - [ ] Profiles added to ch_raw_profiles channel
 - [ ] RMA6 files optionally saved (meganlr_save_rma6=true)
-- [ ] Error handling when .db file missing but meganlr_run_megan=true
-- [ ] Can run with meganlr_run_megan=false (minimap2 only)
+- [ ] Correct matching by db_name (like Bracken)
+- [ ] Can run minimap2 without meganlr (only minimap2 in databases.csv)
+- [ ] Can run different combinations per database
 
 ---
 
@@ -427,7 +452,7 @@ Enable taxpasta to normalize MEGAN-LR output alongside other profilers.
 
 Update the tool mapping (around line 73):
 ```groovy
-// Line 73: Update mapping
+// Line 73: Update mapping to include meganlr
 meta_new.tool = meta.tool == 'malt' || meta.tool == 'meganlr' ? 'megan6' : meta.tool
 ```
 
@@ -447,12 +472,19 @@ This tells taxpasta to treat meganlr output the same as MALT output (both use me
 Add to `nextflow.config`:
 
 ```groovy
-// MEGAN-LR
-run_meganlr                    = false    // Enable MEGAN-LR profiling
-meganlr_save_alignment         = false    // Save minimap2 SAM alignment output
-meganlr_run_megan              = false    // Run MEGAN post-processing (sam2rma + rma2info)
+// Minimap2 (taxonomic profiling)
+run_minimap2                   = false    // Enable minimap2 taxonomic alignment
+minimap2_save_alignment        = false    // Save minimap2 SAM alignment output
+
+// MEGAN-LR (requires minimap2)
+run_meganlr                    = false    // Run MEGAN post-processing (sam2rma + rma2info)
 meganlr_save_rma6              = false    // Save intermediate RMA6 files
 ```
+
+**Note**: Like Bracken, `meganlr` is triggered by:
+1. Having `run_minimap2=true` (runs minimap2 alignment)
+2. Having `run_meganlr=true` (enables MEGAN post-processing)
+3. Having matching `meganlr` entries in databases.csv
 
 ## Database Setup Guide for Users
 
@@ -470,22 +502,30 @@ minimap2 -k 15 -w 10 -I 10G -d nt_ont.mmi nt.fasta.gz
 
 1. Download MEGAN6 Community Edition
 2. Obtain MEGAN nucleotide mapping file (e.g., `megan-nucl-Jan2021.db`)
-3. Place both files in the same directory
 
-### Final Database Directory Structure
+### databases.csv Configuration
 
-```
-/data/databases/meganlr_nt/
-├── nt_ont.mmi                      # Minimap2 index (~50-100GB for nt)
-└── megan-nucl-Jan2021.db          # MEGAN mapping (~20GB)
-```
-
-### databases.csv Entry
-
+**Minimap2 only:**
 ```csv
 tool,db_name,db_params,db_path
-meganlr,nt_ont,,/data/databases/meganlr_nt/
+minimap2,nt_ont,,/data/databases/nt_ont.mmi
 ```
+
+**Full MEGAN-LR:**
+```csv
+tool,db_name,db_params,db_path
+minimap2,nt_ont,,/data/databases/nt_ont.mmi
+meganlr,nt_ont,,/data/databases/megan-nucl-Jan2021.db
+```
+
+**Multiple databases with mixed processing:**
+```csv
+tool,db_name,db_params,db_path
+minimap2,nt_ont,,/data/databases/nt_ont.mmi
+minimap2,refseq_ont,,/data/databases/refseq_ont.mmi
+meganlr,nt_ont,,/data/databases/megan-nucl-Jan2021.db
+```
+This runs full MEGAN-LR on nt_ont, minimap2 alignment only on refseq_ont.
 
 ### Running the Pipeline
 
@@ -495,8 +535,8 @@ nextflow run nf-core/taxprofiler \
   --input samplesheet.csv \
   --databases databases.csv \
   --outdir results \
-  --run_meganlr \
-  --meganlr_save_alignment
+  --run_minimap2 \
+  --minimap2_save_alignment
 ```
 
 **Full MEGAN-LR pipeline:**
@@ -505,26 +545,28 @@ nextflow run nf-core/taxprofiler \
   --input samplesheet.csv \
   --databases databases.csv \
   --outdir results \
+  --run_minimap2 \
   --run_meganlr \
-  --meganlr_run_megan \
   --run_profile_standardisation
 ```
 
 ## Success Criteria Summary
 
 ### Phase 1: Minimap2 Alignment
-- [x] Accepts pre-built .mmi index via databases.csv
-- [x] Supports directory or file path for database
+- [x] Accepts `minimap2` tool in databases.csv
 - [x] Applies ONT-specific alignment parameters (`-ax map-ont`)
 - [x] Can save alignment output (SAM format)
 - [x] Works as standalone taxonomic alignment tool
+- [x] Supports custom parameters via db_params
 
 ### Phase 2: MEGAN Integration
+- [x] Accepts `meganlr` tool in databases.csv
+- [x] Matches minimap2 and meganlr entries by db_name (like Bracken)
 - [x] sam2rma converts minimap2 SAM to RMA6
 - [x] rma2info extracts taxonomic profiles
 - [x] Output format compatible with taxpasta (megan6)
-- [x] Can run minimap2-only OR full MEGAN-LR pipeline
-- [x] Proper error handling for missing MEGAN database
+- [x] Can run minimap2-only OR full MEGAN-LR pipeline per database
+- [x] Follows Bracken pattern for two-step profiling
 
 ### Phase 3: Standardization
 - [x] taxpasta recognizes meganlr as megan6 format
@@ -533,60 +575,67 @@ nextflow run nf-core/taxprofiler \
 
 ### Overall Quality
 - [x] All new modules in `modules/local/`
-- [x] Follows existing nf-core/taxprofiler patterns
+- [x] Follows existing nf-core/taxprofiler patterns (especially Bracken)
 - [x] No automatic index building (users provide pre-built indices)
 - [x] Works with any reference database (not nt-specific)
 - [x] Integrated into `profiling.nf` (not separate subworkflow)
 - [x] Clear documentation for database setup
 - [x] All parameters follow naming conventions
+- [x] Two-line database.csv approach enables modularity
 
 ## Key Differences from Previous Plans
 
 ### What Changed Based on Final Feedback:
-1. **Database handling**: NO automatic index building - users must provide pre-built minimap2 index
-2. **Database pattern**: Follow standard taxonomic profiler pattern (via databases.csv), not host removal pattern
-3. **Simplification**: Removed all index building logic and related parameters
-4. **User responsibility**: Users create and maintain their own minimap2 indices with appropriate parameters
+
+1. **Two tools instead of one**: `minimap2` for alignment, `meganlr` for MEGAN processing
+2. **Follows Bracken pattern**: Two separate database entries matched by `db_name`
+3. **Better modularity**: Can run minimap2 without MEGAN on a per-database basis
+4. **Clearer naming**: `minimap2` reflects what it does (alignment), `meganlr` reflects the full workflow
+5. **Simpler parameters**: No `meganlr_run_megan` - presence of `meganlr` entries triggers it
+6. **Database matching**: Uses `db_name` to link minimap2 and meganlr (like Bracken uses `db_name`)
 
 ### What Stayed the Same:
+
 1. Three-phase implementation approach
 2. Workflow: minimap2 → sam2rma → rma2info
-3. Modularity: can run just minimap2 or full pipeline
-4. Output standardization via taxpasta
-5. ONT-specific default parameters
-6. General reference database support
+3. Output standardization via taxpasta
+4. ONT-specific default parameters
+5. General reference database support
+6. No automatic index building
 
 ## Implementation Order
 
 1. **Phase 1** - Minimap2 alignment (weeks 1-2)
-   - Update schema and parameters
+   - Update schema to add both `minimap2` and `meganlr`
+   - Add minimap2 parameters
    - Add minimap2 block to profiling.nf
    - Configure modules.config
    - Test with pre-built indices
 
 2. **Phase 2** - MEGAN processing (weeks 2-3)
    - Create sam2rma module
-   - Integrate sam2rma and rma2info
-   - Add conditional MEGAN execution
-   - Test full pipeline
+   - Add meganlr parameters
+   - Integrate sam2rma and rma2info with db_name matching
+   - Test full pipeline with various database combinations
 
 3. **Phase 3** - Standardization (week 3)
    - Update standardisation_profiles.nf
    - Test taxpasta integration
    - Final integration testing
 
-## Questions Resolved
+## Questions for Clarification
 
-1. **Database directory structure**: Users organize as they wish; pipeline finds .mmi and .db files automatically
-2. **Index building**: NOT supported - users must provide pre-built indices
-3. **Alignment format**: SAM (default), easier for MEGAN processing
-4. **MEGAN mapping file**: Support nucleotide mapping only (as per manuscript)
-5. **Testing data**: Will need sample ONT metagenomic data and small reference database for CI/CD
+1. **MEGAN rma2info parameters**: Should we allow different parameters per meganlr entry (like Bracken allows different taxonomic levels)?
+2. **Error handling**: If meganlr entry has no matching minimap2 entry, warn or error?
+3. **Output naming**: Follow MALT pattern or create meganlr-specific naming?
+4. **Testing data**: Do we have ONT test data available, or should we create it?
+5. **Documentation**: Should we add a tutorial section like Bracken has?
 
 ## Next Steps
 
 1. ✅ Review this final plan with stakeholders
-2. Begin Phase 1 implementation
-3. Create test datasets (small reference + ONT reads)
-4. Update documentation as each phase completes
-5. Create pull request with comprehensive testing
+2. ✅ Confirm the two-tool approach matches expectations
+3. Begin Phase 1 implementation
+4. Create test datasets (small reference + ONT reads)
+5. Update documentation as each phase completes
+6. Create pull request with comprehensive testing
